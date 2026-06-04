@@ -246,5 +246,6 @@ Validation observed on fresh test servers:
 - Port `8003`, headed Playwright with `lens.google.com/uploadbyurl`: one run reached a large Google results page containing `Exact matches`, `eBay`, and `Etsy`, but the raw HTML still contained retry markers, so it failed the strict validator.
 - Port `8004`, stricter invalid-page handling: API returned `502` instead of leaking retry/captcha HTML as a successful response.
 - Persistent headed profile warmup using `LENS_PLAYWRIGHT_PROFILE_DIR=./browser_profile`: Firefox opened and persisted state. One warmup run reached real Exact Matches HTML with eBay/Etsy/Master Pieces links; later validation ended on a Google captcha page and correctly returned `502`. The latest failed state is saved in `debug_playwright_final.html` and `debug_playwright_final.png`.
+- Concurrency 1 is the only stable tested mode. Concurrency 2 against one persistent Firefox profile caused 0% success because of browser/profile contention. Scaling toward 1000 requests/hour would require separate warmed browser profiles per worker, likely in separate processes/containers/IPs; this has not been tested.
 
 The compile check passed. The running server must be restarted after these changes so it can load the Playwright fallback code. Playwright Firefox is installed locally in this environment.

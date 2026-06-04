@@ -95,6 +95,9 @@ The raw Google result HTML can still contain inert retry/enablejs strings inside
 ## Limitations
 
 - Persistent browser profile may require manual Google consent/captcha warmup.
-- Keep concurrency at `1` for this local setup. The fallback shares one persistent Firefox profile and Google challenge/rate behavior is sensitive.
+- Keep concurrency at `1` for this local setup. This is the only stable tested mode.
+- Concurrency 2 with one persistent profile caused 0% success due to browser/profile contention.
+- Current practical throughput is about 350 requests/hour per warmed worker.
+- Do not claim 1000 requests/hour support yet. The theoretical path would require about 3 isolated warmed workers, likely separate browser profiles plus separate processes/containers/IPs, but that has not been tested.
 - Do not commit copied Firefox cURL files, cookies, debug captures, or browser profile data.
 - This is a reverse-engineered proof of concept and depends on Google UI/backend behavior that can change.

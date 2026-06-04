@@ -25,6 +25,35 @@ success_rate: 99%
 
 The one true failure was an upstream image fetch/navigation failure, not a Google captcha.
 
+## Concurrency 2 Test
+
+Command:
+
+```bash
+python3 experiments/batch_test_urls.py --limit 50 --concurrency 2
+```
+
+Observed summary:
+
+```text
+total: 50
+valid_pages: 0
+valid_pages_with_results: 0
+no_match_pages: 0
+true_failures: 50
+captcha_pages: 1
+average_latency: 6.056s
+max_latency: 192.681s
+p95_latency: 4.202s
+success_rate: 0%
+failure_reasons:
+  validation_failed: 48
+  browser_navigation_failed: 1
+  captcha: 1
+```
+
+Conclusion: concurrency 2 with one persistent Firefox profile is not stable. It caused browser/profile contention and produced 0% valid pages. This result invalidates using one warmed profile concurrently.
+
 ## Sequential Throughput
 
 Using the observed average latency:
@@ -41,7 +70,7 @@ Estimated maximum sequential throughput:
 
 ## Idealized Concurrency Estimates
 
-These estimates assume latency remains flat and requests do not interfere with each other. That is unlikely with the current persistent-browser design, but the math gives an upper bound.
+These estimates assume latency remains flat and requests do not interfere with each other. The concurrency 2 test showed that this assumption is false for one shared persistent Firefox profile. Treat the table below only as a theoretical upper bound for fully isolated warmed workers.
 
 | Concurrency | Estimated req/hour |
 | ---: | ---: |
@@ -53,6 +82,7 @@ These estimates assume latency remains flat and requests do not interfere with e
 ## Expected Bottlenecks
 
 - Single persistent Firefox profile: current reliable path is effectively serialized around one warmed browser profile.
+- Browser/profile contention: concurrency 2 against one profile produced 0% success.
 - Browser startup/navigation cost: each fallback request drives Google/Lens/Search UI and waits for page content.
 - Google challenge behavior: repeated Lens/Search requests from one IP/profile can trigger retry shells, unusual-traffic pages, or captcha.
 - Upstream image fetches: bad, rate-limited, or blocked image URLs fail before Lens upload.
@@ -89,12 +119,26 @@ Mathematically, concurrency 3 would be enough:
 1000 / 356 = 2.81
 ```
 
-But operationally, the current implementation is not designed for safe concurrent browser fallback. Concurrency 2 might work experimentally, but concurrency 5 or 10 would likely increase captcha risk and browser/profile contention.
+But operationally, the current implementation is not designed for safe concurrent browser fallback. Concurrency 2 was tested and failed with 0% success when sharing one persistent Firefox profile.
 
 Practical conclusion:
 
 ```text
-Current architecture: reliable for low-rate local testing, not suitable for 1000 requests/hour.
+Current architecture: stable only at concurrency 1, not suitable for 1000 requests/hour.
 ```
 
-To target 1000 requests/hour, the design would need a pool of isolated warmed browser profiles, request scheduling, backoff, captcha detection, per-profile rate limits, and probably multiple exit IPs. Even then, Google challenge behavior would remain the main reliability risk.
+Current practical throughput is about:
+
+```text
+~350 requests/hour per warmed worker
+```
+
+Theoretical 1000/hour would require about 3 isolated warmed workers:
+
+```text
+1000 / 350 = 2.86 workers
+```
+
+This has not been tested. To target 1000 requests/hour, the design would need a pool of isolated warmed browser profiles, likely separate processes or containers, request scheduling, backoff, captcha detection, per-profile rate limits, and probably separate exit IPs. Even then, Google challenge behavior would remain the main reliability risk.
+
+Do not claim 1000/hour support yet.

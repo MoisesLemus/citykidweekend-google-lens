@@ -158,7 +158,11 @@ X-Google-Lens-Source: playwright_firefox
 
 Known limitation: this local setup depends on a persistent Firefox profile. Google may require a one-time manual consent/captcha warmup in the visible browser before automated requests succeed.
 
-Recommended local concurrency: keep `/google-lens` requests serial, or at most `1` concurrent request, because the fallback shares one persistent Firefox profile and Google rate/challenge behavior is sensitive.
+Recommended local concurrency: `1`. This is the only stable tested mode.
+
+Concurrency 2 was tested with one persistent Firefox profile and produced 0% success due to browser/profile contention. Do not run multiple concurrent requests against one profile.
+
+Current practical throughput is about 350 requests/hour per warmed worker. Reaching 1000 requests/hour is not supported by this implementation yet. The theoretical path would require at least 3 isolated warmed workers, each with its own browser profile and likely its own process/container/IP, but that has not been tested.
 
 ## 🚀 Quick Start for Windows Users
 
