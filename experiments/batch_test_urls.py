@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import csv
 import json
 import os
@@ -36,7 +37,7 @@ IMAGE_URLS = [
     "https://picsum.photos/id/190/640/480.jpg",
 ]
 CHALLENGE_IMAGE_URL = IMAGE_URLS[0]
-CAPTCHA_STOP_THRESHOLD = 3
+CAPTCHA_STOP_THRESHOLD = 2
 
 
 def validate_html(text):
@@ -229,7 +230,7 @@ def write_outputs(results):
         writer.writerows(results)
 
 
-def print_summary(results):
+def print_summary(results, wall_clock_seconds):
     total = len(results)
     valid_pages = sum(1 for result in results if result["valid_exact_match_page"])
     valid_pages_with_results = sum(
@@ -258,6 +259,7 @@ def print_summary(results):
 
     summary = {
         "total": total,
+        "wall_clock_seconds": round(wall_clock_seconds, 3),
         "valid_pages": valid_pages,
         "valid_pages_with_results": valid_pages_with_results,
         "no_match_pages": no_match_pages,
@@ -267,6 +269,9 @@ def print_summary(results):
         "average_latency": round(average_latency, 3),
         "max_latency": round(max_latency, 3),
         "p95_latency": round(p95_latency, 3),
+        "requests_per_hour_estimate": round(
+            (total / wall_clock_seconds) * 3600 if wall_clock_seconds else 0, 1
+        ),
         "success_rate": round(valid_pages / total if total else 0, 3),
         "json": str(OUTPUT_JSON),
         "csv": str(OUTPUT_CSV),
@@ -290,39 +295,73 @@ def parse_args():
         default=API_URL,
         help="Local /google-lens endpoint URL.",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Number of concurrent requests. Keep at 1 or 2 for this local profile.",
+    )
     return parser.parse_args()
+
+
+async def run_batch(image_urls, concurrency):
+    queue = asyncio.Queue()
+    for item in enumerate(image_urls, start=1):
+        queue.put_nowait(item)
+
+    results = []
+    captcha_pages = 0
+    lock = asyncio.Lock()
+    stop_event = asyncio.Event()
+
+    async def worker():
+        nonlocal captcha_pages
+        while not stop_event.is_set():
+            try:
+                index, image_url = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+            print(f"[{index}/{len(image_urls)}] {image_url}")
+            result = await asyncio.to_thread(fetch_one, index, image_url)
+            async with lock:
+                results.append(result)
+                if result["contains_captcha"] or result["error_reason"] == "captcha":
+                    captcha_pages += 1
+                print(
+                    f"  status={result['status_code']} "
+                    f"source={result['source']} "
+                    f"latency={result['latency_seconds']}s "
+                    f"valid_page={result['valid_exact_match_page']} "
+                    f"with_results={result['valid_exact_match_with_results']} "
+                    f"reason={result['error_reason']}"
+                )
+                if captcha_pages > CAPTCHA_STOP_THRESHOLD:
+                    print(
+                        "Stopping early: captcha/unusual traffic appeared "
+                        f"{captcha_pages} times."
+                    )
+                    stop_event.set()
+            queue.task_done()
+
+    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+    await asyncio.gather(*workers)
+    return sorted(results, key=lambda item: item["index"])
 
 
 def main():
     args = parse_args()
     global API_URL
     API_URL = args.api_url
+    if args.concurrency < 1:
+        raise ValueError("--concurrency must be >= 1")
     image_urls = build_image_urls(args.limit)
-    results = []
-    captcha_pages = 0
-
-    for index, image_url in enumerate(image_urls, start=1):
-        print(f"[{index}/{len(image_urls)}] {image_url}")
-        result = fetch_one(index, image_url)
-        results.append(result)
-        if result["contains_captcha"] or result["error_reason"] == "captcha":
-            captcha_pages += 1
-        print(
-            f"  status={result['status_code']} "
-            f"source={result['source']} "
-            f"latency={result['latency_seconds']}s "
-            f"valid_page={result['valid_exact_match_page']} "
-            f"with_results={result['valid_exact_match_with_results']} "
-            f"reason={result['error_reason']}"
-        )
-        if captcha_pages > CAPTCHA_STOP_THRESHOLD:
-            print(
-                f"Stopping early: captcha/unusual traffic appeared {captcha_pages} times."
-            )
-            break
+    started = time.perf_counter()
+    results = asyncio.run(run_batch(image_urls, args.concurrency))
+    wall_clock_seconds = time.perf_counter() - started
 
     write_outputs(results)
-    print_summary(results)
+    print_summary(results, wall_clock_seconds)
 
 
 if __name__ == "__main__":
