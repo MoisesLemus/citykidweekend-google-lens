@@ -225,6 +225,10 @@ Recommended local concurrency: `1`. This is the only stable tested mode. The ser
 
 Concurrency 2 was tested with one persistent Firefox profile and produced 0% success due to browser/profile contention. Do not run multiple concurrent requests against one profile.
 
+External public 300-request test path: Dark Mac on external connection -> Cloudflare Tunnel -> Pink Mac server -> Google Lens. Results: 300 total, 297 valid pages, 290 valid pages with results, 7 no-match pages, 3 true failures, 3 captcha pages, 99.0% success rate, 5.242s average latency, 7.132s p95 latency, 48.158s max latency, and 682.6 estimated requests/hour.
+
+Interpretation: the public tunnel path is validated from a separate machine. Latency and error rate are within challenge requirements, with captcha/unusual-traffic risk as the main remaining limitation.
+
 Latest 1000-style run: attempted 1000 sequential requests and stopped early at 686 because captcha/unusual traffic appeared 4 times. Results were 680 valid pages, 667 valid pages with results, 13 no-match pages, 6 true failures, 99.1% success rate, 2.298s average latency, 2.377s p95 latency, and an estimated 1556.9 requests/hour.
 
 Latest reusable-page local benchmark before the longer run: 100/100 valid pages, average latency around 1.7s.

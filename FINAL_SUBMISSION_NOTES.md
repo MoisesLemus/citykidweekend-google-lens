@@ -111,6 +111,25 @@ The raw Google result HTML can still contain inert retry/enablejs strings inside
 
 ## Stress Test Result
 
+External public 300-request test:
+
+```text
+path: Dark Mac on external connection -> Cloudflare Tunnel -> Pink Mac server -> Google Lens
+total: 300
+valid_pages: 297
+valid_pages_with_results: 290
+no_match_pages: 7
+true_failures: 3
+captcha_pages: 3
+success_rate: 99.0%
+average_latency: 5.242s
+p95_latency: 7.132s
+max_latency: 48.158s
+requests_per_hour_estimate: 682.6
+```
+
+The public tunnel path is validated from a separate machine. Latency and error rate are within challenge requirements, with captcha/unusual-traffic risk as the main remaining limitation.
+
 Latest 1000-style sequential run:
 
 ```text
