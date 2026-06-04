@@ -7,10 +7,11 @@ import time
 from collections import Counter
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 API_URL = os.environ.get("PROJECT4_API_URL", "http://127.0.0.1:8000/google-lens")
+API_KEY = os.environ.get("LENS_API_KEY") or os.environ.get("PROJECT4_API_KEY")
 OUTPUT_JSON = Path("batch_test_results.json")
 OUTPUT_CSV = Path("batch_test_results.csv")
 
@@ -68,6 +69,13 @@ def validate_html(text):
             "automatically detects requests",
         )
     )
+    contains_unusual_traffic = any(
+        marker in lower
+        for marker in (
+            "unusual traffic",
+            "automatically detects requests",
+        )
+    )
     contains_403 = any(
         marker in lower
         for marker in ("403 forbidden", "http error 403", "<title>403", "error 403")
@@ -96,6 +104,8 @@ def validate_html(text):
         "contains_result_links": contains_result_links,
         "contains_no_matches": contains_no_matches,
         "contains_captcha": contains_captcha,
+        "contains_unusual_traffic": contains_unusual_traffic,
+        "captcha_or_unusual_traffic": contains_captcha or contains_unusual_traffic,
         "contains_403": contains_403,
     }
 
@@ -126,24 +136,44 @@ def parse_error_detail(text):
     return None
 
 
+def endpoint_from_base_url(base_url):
+    base = base_url.rstrip("/")
+    if base.endswith("/google-lens"):
+        return base
+    return f"{base}/google-lens"
+
+
+def base_url_from_endpoint(api_url):
+    parsed = urlparse(api_url)
+    if not parsed.scheme or not parsed.netloc:
+        return api_url
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def fetch_one(index, image_url):
     url = f"{API_URL}?{urlencode({'imageUrl': image_url})}"
     started = time.perf_counter()
     status_code = None
     source = None
+    direct_attempt = None
     body = b""
     error = None
     error_detail = None
 
     try:
-        request = Request(url, headers={"Accept": "text/html"})
+        headers = {"Accept": "text/html"}
+        if API_KEY:
+            headers["X-API-KEY"] = API_KEY
+        request = Request(url, headers=headers)
         with urlopen(request, timeout=240) as response:
             status_code = response.status
             source = response.headers.get("X-Google-Lens-Source")
+            direct_attempt = response.headers.get("X-Google-Lens-Direct-Attempt")
             body = response.read()
     except HTTPError as exc:
         status_code = exc.code
         source = exc.headers.get("X-Google-Lens-Source")
+        direct_attempt = exc.headers.get("X-Google-Lens-Direct-Attempt")
         body = exc.read()
         error = str(exc)
     except URLError as exc:
@@ -158,10 +188,13 @@ def fetch_one(index, image_url):
     validation = validate_html(text)
     result = {
         "index": index,
+        "imageUrl": image_url,
         "image_url": image_url,
+        "status": status_code,
         "status_code": status_code,
         "latency_seconds": round(latency_seconds, 3),
         "source": source,
+        "direct_attempt": direct_attempt,
         "body_bytes": len(body),
         "error": error,
         "error_detail": error_detail,
@@ -202,10 +235,13 @@ def write_outputs(results, output_json, output_csv):
 
     fieldnames = [
         "index",
+        "imageUrl",
         "image_url",
+        "status",
         "status_code",
         "latency_seconds",
         "source",
+        "direct_attempt",
         "body_bytes",
         "contains_exact_matches",
         "contains_ebay",
@@ -215,6 +251,8 @@ def write_outputs(results, output_json, output_csv):
         "contains_result_links",
         "contains_no_matches",
         "contains_captcha",
+        "contains_unusual_traffic",
+        "captcha_or_unusual_traffic",
         "contains_403",
         "valid_exact_match_html",
         "valid_exact_match_page",
@@ -292,8 +330,18 @@ def parse_args():
     )
     parser.add_argument(
         "--api-url",
-        default=API_URL,
-        help="Local /google-lens endpoint URL.",
+        default=None,
+        help="Full /google-lens endpoint URL. Overrides --base-url.",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Base server URL, for example https://example.trycloudflare.com.",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=API_KEY,
+        help="API key sent as X-API-KEY. Defaults to LENS_API_KEY or PROJECT4_API_KEY.",
     )
     parser.add_argument(
         "--concurrency",
@@ -304,14 +352,64 @@ def parse_args():
     parser.add_argument(
         "--output-json",
         default=None,
-        help="Path for JSON results. Defaults to batch_test_results_1000.json for --limit 1000.",
+        help=(
+            "Path for JSON results. Defaults to batch_test_results_public_<limit>.json "
+            "with --base-url, or batch_test_results_1000.json for --limit 1000."
+        ),
     )
     parser.add_argument(
         "--output-csv",
         default=None,
-        help="Path for CSV results. Defaults to batch_test_results_1000.csv for --limit 1000.",
+        help=(
+            "Path for CSV results. Defaults to batch_test_results_public_<limit>.csv "
+            "with --base-url, or batch_test_results_1000.csv for --limit 1000."
+        ),
     )
     return parser.parse_args()
+
+
+def output_paths_for_args(args):
+    is_public = bool(args.base_url) and not args.api_url
+    default_json = OUTPUT_JSON
+    default_csv = OUTPUT_CSV
+    if is_public:
+        default_json = Path(f"batch_test_results_public_{args.limit}.json")
+        default_csv = Path(f"batch_test_results_public_{args.limit}.csv")
+    elif args.limit == 1000:
+        default_json = Path("batch_test_results_1000.json")
+        default_csv = Path("batch_test_results_1000.csv")
+    return Path(args.output_json or default_json), Path(args.output_csv or default_csv)
+
+
+def print_config(base_url, image_urls, args, output_json, output_csv):
+    print("batch_config:", flush=True)
+    print(f"  base_url: {base_url}", flush=True)
+    print(f"  api_url: {API_URL}", flush=True)
+    print(f"  total_limit: {args.limit}", flush=True)
+    print(f"  concurrency: {args.concurrency}", flush=True)
+    print(f"  api_key_present: {'yes' if API_KEY else 'no'}", flush=True)
+    print(f"  output_json: {output_json}", flush=True)
+    print(f"  output_csv: {output_csv}", flush=True)
+    print("  first_5_test_image_urls:", flush=True)
+    for url in image_urls[:5]:
+        print(f"    - {url}", flush=True)
+
+
+def run_preflight():
+    print("preflight:", flush=True)
+    result = fetch_one(0, CHALLENGE_IMAGE_URL)
+    print(
+        f"  status={result['status_code']} "
+        f"source={result['source']} "
+        f"direct_attempt={result['direct_attempt']} "
+        f"latency={result['latency_seconds']}s "
+        f"valid_page={result['valid_exact_match_page']} "
+        f"reason={result['error_reason']}",
+        flush=True,
+    )
+    if result["status_code"] != 200 or not result["valid_exact_match_html"]:
+        raise SystemExit("Preflight failed; stopping before batch.")
+    print("  ok=true", flush=True)
 
 
 async def run_batch(image_urls, concurrency, output_json, output_csv):
@@ -368,19 +466,21 @@ async def run_batch(image_urls, concurrency, output_json, output_csv):
 
 def main():
     args = parse_args()
-    global API_URL
-    API_URL = args.api_url
+    global API_URL, API_KEY
+    if args.api_url:
+        API_URL = args.api_url
+    elif args.base_url:
+        API_URL = endpoint_from_base_url(args.base_url)
+    API_KEY = args.api_key
+    base_url = args.base_url.rstrip("/") if args.base_url else base_url_from_endpoint(API_URL)
     if args.concurrency < 1:
         raise ValueError("--concurrency must be >= 1")
+    if not API_KEY:
+        raise ValueError("--api-key is required, or set LENS_API_KEY / PROJECT4_API_KEY")
     image_urls = build_image_urls(args.limit)
-    output_json = Path(
-        args.output_json
-        or ("batch_test_results_1000.json" if args.limit == 1000 else OUTPUT_JSON)
-    )
-    output_csv = Path(
-        args.output_csv
-        or ("batch_test_results_1000.csv" if args.limit == 1000 else OUTPUT_CSV)
-    )
+    output_json, output_csv = output_paths_for_args(args)
+    print_config(base_url, image_urls, args, output_json, output_csv)
+    run_preflight()
     started = time.perf_counter()
     results = asyncio.run(run_batch(image_urls, args.concurrency, output_json, output_csv))
     wall_clock_seconds = time.perf_counter() - started
