@@ -1,3 +1,4 @@
+import argparse
 import csv
 import json
 import os
@@ -34,6 +35,8 @@ IMAGE_URLS = [
     "https://picsum.photos/id/180/640/480.jpg",
     "https://picsum.photos/id/190/640/480.jpg",
 ]
+CHALLENGE_IMAGE_URL = IMAGE_URLS[0]
+CAPTCHA_STOP_THRESHOLD = 3
 
 
 def validate_html(text):
@@ -173,6 +176,26 @@ def fetch_one(index, image_url):
     return result
 
 
+def build_image_urls(limit):
+    if limit <= len(IMAGE_URLS):
+        return IMAGE_URLS[:limit]
+
+    urls = IMAGE_URLS[:]
+    next_index = len(urls) + 1
+    while len(urls) < limit:
+        urls.append(f"https://picsum.photos/seed/project4-batch-{next_index:03d}/640/480.jpg")
+        next_index += 1
+    return urls
+
+
+def percentile(values, percentile_value):
+    if not values:
+        return 0
+    ordered = sorted(values)
+    index = int(round((percentile_value / 100) * (len(ordered) - 1)))
+    return ordered[index]
+
+
 def write_outputs(results):
     OUTPUT_JSON.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
@@ -226,34 +249,64 @@ def print_summary(results):
     latencies = [result["latency_seconds"] for result in results]
     average_latency = sum(latencies) / total if total else 0
     max_latency = max(latencies) if latencies else 0
-
-    print(
-        json.dumps(
-            {
-                "total": total,
-                "valid_pages": valid_pages,
-                "valid_pages_with_results": valid_pages_with_results,
-                "no_match_pages": no_match_pages,
-                "true_failures": true_failures,
-                "failure_reasons": dict(sorted(failure_reasons.items())),
-                "average_latency": round(average_latency, 3),
-                "max_latency": round(max_latency, 3),
-                "success_rate": round(valid_pages / total if total else 0, 3),
-                "json": str(OUTPUT_JSON),
-                "csv": str(OUTPUT_CSV),
-            },
-            indent=2,
-            sort_keys=True,
-        )
+    p95_latency = percentile(latencies, 95)
+    captcha_pages = sum(
+        1
+        for result in results
+        if result["contains_captcha"] or result["error_reason"] == "captcha"
     )
+
+    summary = {
+        "total": total,
+        "valid_pages": valid_pages,
+        "valid_pages_with_results": valid_pages_with_results,
+        "no_match_pages": no_match_pages,
+        "true_failures": true_failures,
+        "captcha_pages": captcha_pages,
+        "failure_reasons": dict(sorted(failure_reasons.items())),
+        "average_latency": round(average_latency, 3),
+        "max_latency": round(max_latency, 3),
+        "p95_latency": round(p95_latency, 3),
+        "success_rate": round(valid_pages / total if total else 0, 3),
+        "json": str(OUTPUT_JSON),
+        "csv": str(OUTPUT_CSV),
+    }
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return summary
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run serial /google-lens reliability tests against public image URLs."
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=len(IMAGE_URLS),
+        help="Number of sequential requests to run. Use --limit 100 for the pre-ngrok run.",
+    )
+    parser.add_argument(
+        "--api-url",
+        default=API_URL,
+        help="Local /google-lens endpoint URL.",
+    )
+    return parser.parse_args()
 
 
 def main():
+    args = parse_args()
+    global API_URL
+    API_URL = args.api_url
+    image_urls = build_image_urls(args.limit)
     results = []
-    for index, image_url in enumerate(IMAGE_URLS, start=1):
-        print(f"[{index}/{len(IMAGE_URLS)}] {image_url}")
+    captcha_pages = 0
+
+    for index, image_url in enumerate(image_urls, start=1):
+        print(f"[{index}/{len(image_urls)}] {image_url}")
         result = fetch_one(index, image_url)
         results.append(result)
+        if result["contains_captcha"] or result["error_reason"] == "captcha":
+            captcha_pages += 1
         print(
             f"  status={result['status_code']} "
             f"source={result['source']} "
@@ -262,6 +315,11 @@ def main():
             f"with_results={result['valid_exact_match_with_results']} "
             f"reason={result['error_reason']}"
         )
+        if captcha_pages > CAPTCHA_STOP_THRESHOLD:
+            print(
+                f"Stopping early: captcha/unusual traffic appeared {captcha_pages} times."
+            )
+            break
 
     write_outputs(results)
     print_summary(results)
