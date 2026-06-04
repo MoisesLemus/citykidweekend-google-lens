@@ -8,6 +8,20 @@ Implemented:
 GET /google-lens?imageUrl={image_url}
 ```
 
+Current public Cloudflare Tunnel API URL:
+
+```text
+https://gaming-felt-raymond-yea.trycloudflare.com/google-lens?imageUrl={image_url}
+```
+
+Required request header:
+
+```text
+X-API-KEY: <key>
+```
+
+The Cloudflare quick tunnel must stay running during review.
+
 The endpoint returns raw Google Lens / Google Search Exact Matches HTML.
 
 Server entry point:
@@ -116,10 +130,14 @@ requests_per_hour_estimate: 1556.9
 
 The API met the challenge's 300+ valid HTML threshold before early stop and exceeded latency requirements. Google captcha/unusual-traffic risk remains the main scaling limitation.
 
+Latest reusable-page local benchmark before the longer run: 100/100 valid pages, average latency around 1.7s.
+
 ## Limitations
 
 - Persistent browser profile may require manual Google consent/captcha warmup.
 - Keep concurrency at `1` for this local single-profile setup. This is the only stable tested mode.
+- Max recommended concurrency for review traffic is `1`.
+- Cloudflare quick tunnel must remain running during review; the public URL is tunnel-backed, not permanent hosting.
 - Concurrency 2 with one persistent profile caused 0% success due to browser/profile contention.
 - Current 1000-style run estimated 1556.9 requests/hour before captcha early stop.
 - Do not claim full 1000-request reliability yet. The latest run stopped at 686 after 4 captcha/unusual-traffic pages.

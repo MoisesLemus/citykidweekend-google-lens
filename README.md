@@ -27,6 +27,20 @@ This fork also includes a Project 4 proof-of-concept API:
 GET /google-lens?imageUrl={image_url}
 ```
 
+Current public Cloudflare Tunnel endpoint for review:
+
+```text
+https://gaming-felt-raymond-yea.trycloudflare.com/google-lens?imageUrl={image_url}
+```
+
+Required request header:
+
+```text
+X-API-KEY: <key>
+```
+
+The Cloudflare quick tunnel must stay running during review; this URL is not a permanent hosted deployment.
+
 The endpoint returns raw Google Lens / Google Search Exact Matches HTML. The stable default path uses Playwright Firefox with a warmed persistent profile, one reusable browser context, and one shared page guarded by an `asyncio.Lock`. The reverse-engineered direct HTTP flow was researched but is disabled by default because Google returns a JavaScript retry shell in this environment.
 
 The disabled direct HTTP research flow is:
@@ -171,6 +185,15 @@ curl -i \
   -o api_test.html
 ```
 
+Public tunnel example:
+
+```bash
+curl -i \
+  -H "X-API-KEY: $LENS_API_KEY" \
+  "https://gaming-felt-raymond-yea.trycloudflare.com/google-lens?imageUrl=https%3A%2F%2Fi.ebayimg.com%2F00%2Fs%2FMTYwMFgxNjAw%2Fz%2FBVcAAOSwS9m4zOb%2F%24_57.JPG" \
+  -o api_test.html
+```
+
 Authentication checks:
 
 ```bash
@@ -203,6 +226,8 @@ Recommended local concurrency: `1`. This is the only stable tested mode. The ser
 Concurrency 2 was tested with one persistent Firefox profile and produced 0% success due to browser/profile contention. Do not run multiple concurrent requests against one profile.
 
 Latest 1000-style run: attempted 1000 sequential requests and stopped early at 686 because captcha/unusual traffic appeared 4 times. Results were 680 valid pages, 667 valid pages with results, 13 no-match pages, 6 true failures, 99.1% success rate, 2.298s average latency, 2.377s p95 latency, and an estimated 1556.9 requests/hour.
+
+Latest reusable-page local benchmark before the longer run: 100/100 valid pages, average latency around 1.7s.
 
 Interpretation: the API met the challenge's 300+ valid HTML threshold before early stop and exceeded latency requirements. Google captcha/unusual-traffic risk remains the main scaling limitation, so recommended max concurrency remains `1` for this local single-profile setup.
 
