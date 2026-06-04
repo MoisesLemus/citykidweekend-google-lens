@@ -19,6 +19,147 @@
 
 This project provides a powerful, asynchronous Python library and command-line tool for interacting with Google Lens. It allows you to perform advanced Optical Character Recognition (OCR), get segmented text blocks (e.g., for comics), translate text, and get precise word coordinates.
 
+## Project 4: Exact Matches HTML API
+
+This fork also includes a Project 4 proof-of-concept API:
+
+```text
+GET /google-lens?imageUrl={image_url}
+```
+
+The endpoint returns raw Google Lens / Google Search Exact Matches HTML. The implementation keeps the reverse-engineered direct HTTP flow as attempt #1:
+
+1. Download the input image URL.
+2. Upload bytes to `https://lens.google.com/v3/upload`.
+3. Read the Google Search redirect containing Lens session IDs.
+4. Set `udm=48` for Exact Matches.
+5. Fetch the resulting Google Search document.
+
+Direct HTTP can return Google's JavaScript retry shell (`/httpservice/retry/enablejs`, `knitsail`, `SG_SS`, `enablejs`). When that happens, the API treats the body as invalid and falls back to Playwright Firefox so the browser can execute Google's retry step and return `page.content()`.
+
+If Firefox receives a Google captcha / unusual-traffic page, the API returns `502` instead of returning that block page as a successful Exact Matches response.
+
+Run the API:
+
+```bash
+pip install -r requirements.txt
+python3 -m playwright install firefox
+uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
+```
+
+First-time warmup for the reliable Firefox path:
+
+```bash
+export LENS_PLAYWRIGHT_HEADLESS=0
+export LENS_PLAYWRIGHT_PROFILE_DIR=./browser_profile
+PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
+```
+
+Then call the API once. A visible Firefox window should open. If Google asks for consent or a captcha, complete it manually in that window. The browser state is kept in `./browser_profile`, so retrying the API can reuse the warmed profile.
+The first request may wait until `LENS_BROWSER_TIMEOUT` while you complete the prompt.
+
+Successful local warmup flow:
+
+1. Start the server with `LENS_PLAYWRIGHT_HEADLESS=0` and `LENS_PLAYWRIGHT_PROFILE_DIR=./browser_profile`.
+2. Call the API once.
+3. Solve Google consent/captcha in the visible Firefox window if shown.
+4. Rerun `python3 experiments/test_api_local.py`.
+
+Expected successful test markers:
+
+```text
+status: 200
+source: playwright_firefox
+valid_exact_match_html: true
+contains_exact_matches: true
+contains_ebay: true
+contains_etsy: true
+```
+
+Google's normal result HTML can contain inert retry/enablejs strings inside scripts. Those are only treated as invalid when the page lacks real Exact Matches/result markers.
+
+The response includes:
+
+```text
+X-Google-Lens-Source: direct_http
+```
+
+or:
+
+```text
+X-Google-Lens-Source: playwright_firefox
+```
+
+When browser fallback is used, the source header should be:
+
+```text
+X-Google-Lens-Source: playwright_firefox
+```
+
+Local validation:
+
+```bash
+python3 experiments/test_api_local.py
+```
+
+Do not commit copied Firefox cURL files or Google cookies. `experiments/firefox_exact_match.curl` is ignored locally and should remain a private debugging artifact.
+
+## Final Submission Quick Start
+
+Setup:
+
+```bash
+cd /Users/moisesphilo/Documents/codex/project4/repos/chrome-lens-py
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+python3 -m playwright install firefox
+```
+
+Warm up the persistent Firefox profile:
+
+```bash
+export LENS_PLAYWRIGHT_HEADLESS=0
+export LENS_PLAYWRIGHT_PROFILE_DIR=./browser_profile
+export LENS_BROWSER_TIMEOUT=180
+PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
+```
+
+Call the endpoint once. If Google shows consent or captcha in the visible Firefox window, solve it manually. Then rerun the local test.
+
+Run server:
+
+```bash
+PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
+```
+
+Test endpoint:
+
+```bash
+curl -i "http://127.0.0.1:8000/google-lens?imageUrl=https%3A%2F%2Fi.ebayimg.com%2F00%2Fs%2FMTYwMFgxNjAw%2Fz%2FBVcAAOSwS9m4zOb%2F%24_57.JPG" -o api_test.html
+```
+
+Quick local smoke test:
+
+```bash
+python3 experiments/test_api_local.py
+```
+
+Expected source header when fallback is used:
+
+```text
+X-Google-Lens-Source: playwright_firefox
+```
+
+Known limitation: this local setup depends on a persistent Firefox profile. Google may require a one-time manual consent/captcha warmup in the visible browser before automated requests succeed.
+
+Recommended local concurrency: keep `/google-lens` requests serial, or at most `1` concurrent request, because the fallback shares one persistent Firefox profile and Google rate/challenge behavior is sensitive.
+
 ## 🚀 Quick Start for Windows Users
 
 If you don't want to install Python, you can download the standalone **lens_scan-windows-amd64.exe** from the [Releases](https://github.com/bropines/chrome-lens-py/releases) section.

@@ -125,3 +125,10 @@ src/chrome_lens_py.egg-info/
 # mylist
 tree.txt
 test.py
+experiments/firefox_exact_match.curl
+firefox_replay_exact_match.html
+browser_profile/
+debug_playwright_final.html
+debug_playwright_final.png
+api_test.html
+cookies_lens_test.json

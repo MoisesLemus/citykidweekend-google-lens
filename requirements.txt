@@ -4,6 +4,9 @@ filetype
 json5
 PySocks
 httpx[socks]
+fastapi
+uvicorn
+playwright
 numpy
 rich
 #betterproto >= 2.0.0b6
