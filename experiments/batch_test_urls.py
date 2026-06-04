@@ -37,7 +37,7 @@ IMAGE_URLS = [
     "https://picsum.photos/id/190/640/480.jpg",
 ]
 CHALLENGE_IMAGE_URL = IMAGE_URLS[0]
-CAPTCHA_STOP_THRESHOLD = 2
+CAPTCHA_STOP_THRESHOLD = 3
 
 
 def validate_html(text):
@@ -197,8 +197,8 @@ def percentile(values, percentile_value):
     return ordered[index]
 
 
-def write_outputs(results):
-    OUTPUT_JSON.write_text(json.dumps(results, indent=2), encoding="utf-8")
+def write_outputs(results, output_json, output_csv):
+    output_json.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
     fieldnames = [
         "index",
@@ -224,13 +224,13 @@ def write_outputs(results):
         "failed_body_path",
         "error",
     ]
-    with OUTPUT_CSV.open("w", newline="", encoding="utf-8") as csv_file:
+    with output_csv.open("w", newline="", encoding="utf-8") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(results)
 
 
-def print_summary(results, wall_clock_seconds):
+def print_summary(results, wall_clock_seconds, output_json, output_csv):
     total = len(results)
     valid_pages = sum(1 for result in results if result["valid_exact_match_page"])
     valid_pages_with_results = sum(
@@ -273,8 +273,8 @@ def print_summary(results, wall_clock_seconds):
             (total / wall_clock_seconds) * 3600 if wall_clock_seconds else 0, 1
         ),
         "success_rate": round(valid_pages / total if total else 0, 3),
-        "json": str(OUTPUT_JSON),
-        "csv": str(OUTPUT_CSV),
+        "json": str(output_json),
+        "csv": str(output_csv),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
     return summary
@@ -301,10 +301,20 @@ def parse_args():
         default=1,
         help="Number of concurrent requests. Keep at 1 or 2 for this local profile.",
     )
+    parser.add_argument(
+        "--output-json",
+        default=None,
+        help="Path for JSON results. Defaults to batch_test_results_1000.json for --limit 1000.",
+    )
+    parser.add_argument(
+        "--output-csv",
+        default=None,
+        help="Path for CSV results. Defaults to batch_test_results_1000.csv for --limit 1000.",
+    )
     return parser.parse_args()
 
 
-async def run_batch(image_urls, concurrency):
+async def run_batch(image_urls, concurrency, output_json, output_csv):
     queue = asyncio.Queue()
     for item in enumerate(image_urls, start=1):
         queue.put_nowait(item)
@@ -322,24 +332,31 @@ async def run_batch(image_urls, concurrency):
             except asyncio.QueueEmpty:
                 return
 
-            print(f"[{index}/{len(image_urls)}] {image_url}")
+            should_print_detail = len(image_urls) <= 100 or index == 1 or index % 25 == 0
+            if should_print_detail:
+                print(f"[{index}/{len(image_urls)}] {image_url}", flush=True)
             result = await asyncio.to_thread(fetch_one, index, image_url)
             async with lock:
                 results.append(result)
                 if result["contains_captcha"] or result["error_reason"] == "captcha":
                     captcha_pages += 1
-                print(
-                    f"  status={result['status_code']} "
-                    f"source={result['source']} "
-                    f"latency={result['latency_seconds']}s "
-                    f"valid_page={result['valid_exact_match_page']} "
-                    f"with_results={result['valid_exact_match_with_results']} "
-                    f"reason={result['error_reason']}"
-                )
+                if should_print_detail:
+                    print(
+                        f"  status={result['status_code']} "
+                        f"source={result['source']} "
+                        f"latency={result['latency_seconds']}s "
+                        f"valid_page={result['valid_exact_match_page']} "
+                        f"with_results={result['valid_exact_match_with_results']} "
+                        f"reason={result['error_reason']}",
+                        flush=True,
+                    )
+                if len(results) % 25 == 0:
+                    write_outputs(sorted(results, key=lambda item: item["index"]), output_json, output_csv)
                 if captcha_pages > CAPTCHA_STOP_THRESHOLD:
                     print(
                         "Stopping early: captcha/unusual traffic appeared "
-                        f"{captcha_pages} times."
+                        f"{captcha_pages} times.",
+                        flush=True,
                     )
                     stop_event.set()
             queue.task_done()
@@ -356,12 +373,20 @@ def main():
     if args.concurrency < 1:
         raise ValueError("--concurrency must be >= 1")
     image_urls = build_image_urls(args.limit)
+    output_json = Path(
+        args.output_json
+        or ("batch_test_results_1000.json" if args.limit == 1000 else OUTPUT_JSON)
+    )
+    output_csv = Path(
+        args.output_csv
+        or ("batch_test_results_1000.csv" if args.limit == 1000 else OUTPUT_CSV)
+    )
     started = time.perf_counter()
-    results = asyncio.run(run_batch(image_urls, args.concurrency))
+    results = asyncio.run(run_batch(image_urls, args.concurrency, output_json, output_csv))
     wall_clock_seconds = time.perf_counter() - started
 
-    write_outputs(results)
-    print_summary(results, wall_clock_seconds)
+    write_outputs(results, output_json, output_csv)
+    print_summary(results, wall_clock_seconds, output_json, output_csv)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ First-time warmup for the reliable Firefox path:
 ```bash
 export LENS_PLAYWRIGHT_HEADLESS=0
 export LENS_PLAYWRIGHT_PROFILE_DIR=./browser_profile
+export LENS_API_KEY=change-me
 PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
 ```
 
@@ -88,6 +89,20 @@ The response includes:
 X-Google-Lens-Source: playwright_firefox
 X-Google-Lens-Direct-Attempt: skipped
 ```
+
+API key authentication is required. Configure:
+
+```bash
+export LENS_API_KEY=change-me
+```
+
+Every request must include:
+
+```text
+X-API-KEY: change-me
+```
+
+Missing `X-API-KEY` returns `401`; a wrong key returns `403`.
 
 If direct HTTP is explicitly enabled and succeeds before the browser fallback, the source can be:
 
@@ -135,6 +150,7 @@ export LENS_PLAYWRIGHT_HEADLESS=0
 export LENS_PLAYWRIGHT_PROFILE_DIR=./browser_profile
 export LENS_BROWSER_TIMEOUT=180
 export LENS_USE_DIRECT_HTTP=0
+export LENS_API_KEY=change-me
 PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
 ```
 
@@ -149,13 +165,28 @@ PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
 Test endpoint:
 
 ```bash
-curl -i "http://127.0.0.1:8000/google-lens?imageUrl=https%3A%2F%2Fi.ebayimg.com%2F00%2Fs%2FMTYwMFgxNjAw%2Fz%2FBVcAAOSwS9m4zOb%2F%24_57.JPG" -o api_test.html
+curl -i \
+  -H "X-API-KEY: $LENS_API_KEY" \
+  "http://127.0.0.1:8000/google-lens?imageUrl=https%3A%2F%2Fi.ebayimg.com%2F00%2Fs%2FMTYwMFgxNjAw%2Fz%2FBVcAAOSwS9m4zOb%2F%24_57.JPG" \
+  -o api_test.html
+```
+
+Authentication checks:
+
+```bash
+# Missing key -> 401
+curl -i "http://127.0.0.1:8000/google-lens?imageUrl=https%3A%2F%2Fi.ebayimg.com%2F00%2Fs%2FMTYwMFgxNjAw%2Fz%2FBVcAAOSwS9m4zOb%2F%24_57.JPG"
+
+# Wrong key -> 403
+curl -i \
+  -H "X-API-KEY: wrong" \
+  "http://127.0.0.1:8000/google-lens?imageUrl=https%3A%2F%2Fi.ebayimg.com%2F00%2Fs%2FMTYwMFgxNjAw%2Fz%2FBVcAAOSwS9m4zOb%2F%24_57.JPG"
 ```
 
 Quick local smoke test:
 
 ```bash
-python3 experiments/test_api_local.py
+LENS_API_KEY=change-me python3 experiments/test_api_local.py
 ```
 
 Expected source header when fallback is used:

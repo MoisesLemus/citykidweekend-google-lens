@@ -1,5 +1,7 @@
+import asyncio
 import html
 import itertools
+import logging
 import re
 import shlex
 import time
@@ -9,6 +11,8 @@ from typing import Dict, List, Optional
 from urllib.parse import parse_qs, quote, urlencode, unquote, urljoin, urlparse, urlunparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 LENS_UPLOAD_ENDPOINT = "https://lens.google.com/v3/upload"
 DEBUG_PLAYWRIGHT_HTML = Path("debug_playwright_final.html")
@@ -273,6 +277,7 @@ class ExactMatchResponse:
     final_url: str
     ids: Dict[str, Optional[str]]
     source: str = "direct_http"
+    direct_attempt: str = "performed"
 
 
 class GoogleLensExactMatchesClient:
@@ -332,24 +337,45 @@ class GoogleLensExactMatchesClient:
             source="direct_http",
         )
 
-    async def fetch_exact_matches_with_fallback(self, image_url: str) -> ExactMatchResponse:
+    async def fetch_exact_matches_with_fallback(
+        self, image_url: str, use_direct_http: bool = False
+    ) -> ExactMatchResponse:
+        logger.warning("direct_http_enabled=%s", use_direct_http)
+        if not use_direct_http:
+            logger.warning("direct_attempt=skipped")
+            return await self.fetch_exact_matches_with_firefox(image_url, None)
+
+        logger.warning("direct_attempt=performed")
         direct_result = await self.fetch_exact_matches(image_url)
         if not is_retry_shell(direct_result.html):
             return direct_result
         return await self.fetch_exact_matches_with_firefox(image_url, direct_result)
 
     async def fetch_exact_matches_with_firefox(
-        self, image_url: str, direct_result: ExactMatchResponse
+        self, image_url: str, direct_result: Optional[ExactMatchResponse]
     ) -> ExactMatchResponse:
         try:
             from playwright.async_api import async_playwright
         except ImportError as error:
             raise LensExactMatchesError(
-                "direct_http_retry_shell",
-                "Direct HTTP returned Google retry shell and Playwright is not installed. "
-                "Install dependencies with `pip install -r requirements.txt` and run "
+                "browser_navigation_failed",
+                "Playwright is not installed. Install dependencies with "
+                "`pip install -r requirements.txt` and run "
                 "`python3 -m playwright install firefox`."
             ) from error
+
+        if direct_result is None:
+            direct_result = ExactMatchResponse(
+                html="",
+                upload_status=0,
+                redirect_location="",
+                exact_url="",
+                exact_status=0,
+                final_url="",
+                ids={},
+                source="playwright_firefox",
+                direct_attempt="skipped",
+            )
 
         timeout_ms = int(self.browser_timeout * 1000)
         async with async_playwright() as playwright:
@@ -372,30 +398,76 @@ class GoogleLensExactMatchesClient:
                 browser = await playwright.firefox.launch(headless=self.headless)
                 context = await browser.new_context(**context_options)
 
-            page = await context.new_page()
-            page.set_default_timeout(timeout_ms)
+            page = None
             try:
-                await page.goto("https://www.google.com/", wait_until="domcontentloaded")
-                await self._dismiss_google_consent(page)
-
-                browser_url = await self._open_lens_uploadbyurl(page, image_url)
-                if browser_url:
-                    direct_result.exact_url = exact_matches_url_from_redirect(browser_url)
-                    direct_result.ids = extract_ids_from_url(browser_url)
-
-                await self._open_exact_matches_in_browser(page, direct_result.exact_url)
-                html_text = await self._wait_for_browser_exact_html(page)
-                final_url = page.url
+                page = await context.new_page()
+                page.set_default_timeout(timeout_ms)
+                return await self.fetch_exact_matches_with_page(
+                    image_url, context, page, direct_result
+                )
             except LensExactMatchesError:
-                await self._save_playwright_debug(page)
+                if page:
+                    await self._save_playwright_debug(page)
                 raise
             except Exception:
-                await self._save_playwright_debug(page)
+                if page:
+                    await self._save_playwright_debug(page)
                 raise LensExactMatchesError("browser_navigation_failed") from None
             finally:
                 await context.close()
                 if browser:
                     await browser.close()
+
+    async def fetch_exact_matches_with_page(
+        self,
+        image_url: str,
+        context,
+        page,
+        direct_result: Optional[ExactMatchResponse] = None,
+    ) -> ExactMatchResponse:
+        if direct_result is None:
+            direct_result = ExactMatchResponse(
+                html="",
+                upload_status=0,
+                redirect_location="",
+                exact_url="",
+                exact_status=0,
+                final_url="",
+                ids={},
+                source="playwright_firefox",
+                direct_attempt="skipped",
+            )
+
+        page.set_default_timeout(int(self.browser_timeout * 1000))
+        logger.warning("page_reused")
+        logger.warning("browser_initial_url=%s", page.url)
+
+        upload_redirect_url = await self._get_lens_uploadbyurl_redirect(context, image_url)
+        logger.warning("upload_redirect_url=%s", upload_redirect_url or "")
+        if upload_redirect_url:
+            direct_result.redirect_location = upload_redirect_url
+            direct_result.exact_url = exact_matches_url_from_redirect(upload_redirect_url)
+            direct_result.ids = extract_ids_from_url(upload_redirect_url)
+
+        if not direct_result.exact_url:
+            browser_url = await self._open_lens_uploadbyurl(page, image_url)
+            logger.warning("upload_redirect_url=%s", browser_url or "")
+            if browser_url:
+                direct_result.redirect_location = browser_url
+                direct_result.exact_url = exact_matches_url_from_redirect(browser_url)
+                direct_result.ids = extract_ids_from_url(browser_url)
+
+        if not direct_result.exact_url:
+            raise LensExactMatchesError(
+                "no_exact_match_tab",
+                "Browser upload did not produce a Lens/Search URL for Exact Matches.",
+            )
+
+        logger.warning("exact_match_url=%s", direct_result.exact_url)
+        await self._open_exact_matches_in_browser(page, direct_result.exact_url)
+        html_text = await self._wait_for_browser_exact_html(page)
+        final_url = page.url
+        logger.warning("final_url=%s", final_url)
 
         return ExactMatchResponse(
             html=html_text,
@@ -406,6 +478,7 @@ class GoogleLensExactMatchesClient:
             final_url=final_url,
             ids=direct_result.ids,
             source="playwright_firefox",
+            direct_attempt=direct_result.direct_attempt,
         )
 
     async def _wait_for_browser_exact_html(self, page):
@@ -458,6 +531,27 @@ class GoogleLensExactMatchesClient:
         except Exception:
             pass
 
+    async def _get_lens_uploadbyurl_redirect(self, context, image_url: str) -> Optional[str]:
+        upload_url = f"https://lens.google.com/uploadbyurl?url={quote(image_url, safe='')}&hl=en"
+        try:
+            response = await context.request.get(
+                upload_url,
+                max_redirects=0,
+                timeout=int(self.browser_timeout * 1000),
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": "https://www.google.com/",
+                },
+            )
+            location = response.headers.get("location")
+            if location:
+                return urljoin(response.url, location)
+            if "vsrid=" in response.url or "udm=" in response.url:
+                return response.url
+            return None
+        except Exception:
+            return None
+
     async def _open_lens_uploadbyurl(self, page, image_url: str) -> Optional[str]:
         upload_url = f"https://lens.google.com/uploadbyurl?url={quote(image_url, safe='')}&hl=en"
         try:
@@ -472,15 +566,6 @@ class GoogleLensExactMatchesClient:
             return None
 
     async def _open_exact_matches_in_browser(self, page, exact_url: str):
-        exact_link = page.get_by_text(re.compile(r"exact matches", re.I)).first
-        try:
-            if await exact_link.count():
-                await exact_link.click(timeout=3000)
-                await page.wait_for_timeout(1500)
-                return
-        except Exception:
-            pass
-
         await page.goto(
             exact_url,
             wait_until="domcontentloaded",
@@ -564,3 +649,97 @@ class GoogleLensExactMatchesClient:
 
         response = await client.get(exact_url, headers=headers)
         return response.text, response.status_code, str(response.url)
+
+
+class BrowserSessionManager:
+    def __init__(
+        self,
+        headers: Optional[Dict[str, str]] = None,
+        browser_timeout: float = 45.0,
+        headless: bool = True,
+        profile_dir: Optional[Path] = None,
+    ):
+        self.client = GoogleLensExactMatchesClient(
+            headers=headers,
+            browser_timeout=browser_timeout,
+            headless=headless,
+            profile_dir=profile_dir,
+        )
+        self.browser_timeout = browser_timeout
+        self.headless = headless
+        self.profile_dir = Path(profile_dir) if profile_dir else None
+        self.lock = asyncio.Lock()
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+
+    async def _ensure_started(self):
+        if self.context and self.page and not self.page.is_closed():
+            logger.warning("browser_session_reused")
+            return
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as error:
+            raise LensExactMatchesError(
+                "browser_navigation_failed",
+                "Playwright is not installed. Install dependencies with "
+                "`pip install -r requirements.txt` and run "
+                "`python3 -m playwright install firefox`."
+            ) from error
+
+        if not self.playwright:
+            self.playwright = await async_playwright().start()
+
+        context_options = {
+            "locale": "en-US",
+            "viewport": {"width": 1365, "height": 900},
+        }
+        if self.client.headers.get("User-Agent") and not self.profile_dir:
+            context_options["user_agent"] = self.client.headers["User-Agent"]
+
+        if self.profile_dir:
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
+            self.context = await self.playwright.firefox.launch_persistent_context(
+                str(self.profile_dir),
+                headless=self.headless,
+                **context_options,
+            )
+        else:
+            self.browser = await self.playwright.firefox.launch(headless=self.headless)
+            self.context = await self.browser.new_context(**context_options)
+
+        self.page = await self.context.new_page()
+        self.page.set_default_timeout(int(self.browser_timeout * 1000))
+        logger.warning("browser_session_started")
+
+    async def fetch_exact_matches(
+        self, image_url: str, direct_result: Optional[ExactMatchResponse] = None
+    ) -> ExactMatchResponse:
+        async with self.lock:
+            await self._ensure_started()
+            try:
+                return await self.client.fetch_exact_matches_with_page(
+                    image_url, self.context, self.page, direct_result
+                )
+            except LensExactMatchesError:
+                await self.client._save_playwright_debug(self.page)
+                raise
+            except Exception:
+                await self.client._save_playwright_debug(self.page)
+                raise LensExactMatchesError("browser_navigation_failed") from None
+
+    async def close(self):
+        async with self.lock:
+            if self.context:
+                await self.context.close()
+                self.context = None
+                self.page = None
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+            if self.playwright:
+                await self.playwright.stop()
+                self.playwright = None
+            logger.warning("browser_session_closed")
