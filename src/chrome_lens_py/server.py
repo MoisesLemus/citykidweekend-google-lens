@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Response
 
-from .exact_matches import GoogleLensExactMatchesClient
+from .exact_matches import GoogleLensExactMatchesClient, LensExactMatchesError
 
 DEFAULT_CURL_PATH = Path("experiments/firefox_exact_match.curl")
 logger = logging.getLogger(__name__)
@@ -58,13 +58,25 @@ async def google_lens(imageUrl: str = Query(..., min_length=1)):
         logger.warning("Google Lens upstream HTTP error: %s", error)
         raise HTTPException(
             status_code=502,
-            detail=f"Upstream request failed with HTTP {error.response.status_code}",
+            detail={
+                "reason": "browser_navigation_failed",
+                "message": f"Upstream request failed with HTTP {error.response.status_code}",
+            },
+        ) from error
+    except LensExactMatchesError as error:
+        logger.warning("Google Lens API failed: %s", error)
+        raise HTTPException(
+            status_code=502,
+            detail={"reason": error.reason, "message": str(error)},
         ) from error
     except Exception as error:
         logger.warning("Google Lens API failed: %s", error)
         raise HTTPException(
             status_code=502,
-            detail="Google Lens fallback did not produce valid result HTML",
+            detail={
+                "reason": "validation_failed",
+                "message": "Google Lens fallback did not produce valid result HTML",
+            },
         ) from error
 
     return Response(

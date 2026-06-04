@@ -1,4 +1,5 @@
 import html
+import itertools
 import re
 import shlex
 import time
@@ -12,6 +13,7 @@ import httpx
 LENS_UPLOAD_ENDPOINT = "https://lens.google.com/v3/upload"
 DEBUG_PLAYWRIGHT_HTML = Path("debug_playwright_final.html")
 DEBUG_PLAYWRIGHT_PNG = Path("debug_playwright_final.png")
+DEBUG_FAIL_COUNTER = itertools.count(1)
 RETRY_SHELL_MARKERS = (
     "/httpservice/retry/enablejs",
     "knitsail",
@@ -28,6 +30,24 @@ BLOCK_MARKERS = (
     "unusual traffic",
     "automatically detects requests",
 )
+NO_MATCH_MARKERS = (
+    "no matches for your search",
+    "no exact matches",
+)
+RESULT_MARKERS = (
+    "href=",
+    "ebay",
+    "etsy",
+    "www.ebay.com/itm",
+    "etsy.com/listing",
+    "master pieces",
+)
+
+
+class LensExactMatchesError(RuntimeError):
+    def __init__(self, reason: str, message: Optional[str] = None):
+        self.reason = reason
+        super().__init__(message or reason)
 
 
 def parse_cookie_header(cookie_header: str) -> Dict[str, str]:
@@ -189,26 +209,30 @@ def validate_exact_html(text: str) -> Dict[str, object]:
     contains_etsy = "etsy" in lower
     contains_master_pieces = "master pieces" in lower
     contains_ebay_item_url = "www.ebay.com/itm" in lower
+    contains_no_matches = any(marker in lower for marker in NO_MATCH_MARKERS)
+    contains_result_links = any(marker in lower for marker in RESULT_MARKERS)
     contains_google_block = is_google_block_page(text)
-    valid_exact_match_html = (
+    valid_exact_match_with_results = (
         contains_exact_matches
-        and any(
-            (
-                contains_ebay,
-                contains_etsy,
-                contains_master_pieces,
-                contains_ebay_item_url,
-            )
-        )
+        and contains_result_links
+        and not contains_google_block
+    )
+    valid_exact_match_page = (
+        contains_exact_matches
+        and (contains_result_links or contains_no_matches)
         and not contains_google_block
     )
     return {
-        "valid_exact_match_html": valid_exact_match_html,
+        "valid_exact_match_html": valid_exact_match_page,
+        "valid_exact_match_page": valid_exact_match_page,
+        "valid_exact_match_with_results": valid_exact_match_with_results,
         "contains_exact_matches": contains_exact_matches,
         "contains_ebay": contains_ebay,
         "contains_etsy": contains_etsy,
         "contains_master_pieces": contains_master_pieces,
         "contains_ebay_item_url": contains_ebay_item_url,
+        "contains_result_links": contains_result_links,
+        "contains_no_matches": contains_no_matches,
         "contains_403": "403" in lower,
         "contains_captcha": "captcha" in lower,
         "contains_google_block": contains_google_block,
@@ -220,7 +244,9 @@ def validate_exact_html(text: str) -> Dict[str, object]:
 
 def is_retry_shell(text: str) -> bool:
     lower = text.lower()
-    return any(marker.lower() in lower for marker in RETRY_SHELL_MARKERS)
+    return any(marker.lower() in lower for marker in RETRY_SHELL_MARKERS) and not bool(
+        validate_exact_html(text)["valid_exact_match_page"]
+    )
 
 
 def is_active_retry_page(text: str) -> bool:
@@ -234,7 +260,7 @@ def is_google_block_page(text: str) -> bool:
 
 
 def is_likely_exact_matches(text: str) -> bool:
-    return bool(validate_exact_html(text)["valid_exact_match_html"])
+    return bool(validate_exact_html(text)["valid_exact_match_page"])
 
 
 @dataclass
@@ -318,7 +344,8 @@ class GoogleLensExactMatchesClient:
         try:
             from playwright.async_api import async_playwright
         except ImportError as error:
-            raise RuntimeError(
+            raise LensExactMatchesError(
+                "direct_http_retry_shell",
                 "Direct HTTP returned Google retry shell and Playwright is not installed. "
                 "Install dependencies with `pip install -r requirements.txt` and run "
                 "`python3 -m playwright install firefox`."
@@ -359,9 +386,12 @@ class GoogleLensExactMatchesClient:
                 await self._open_exact_matches_in_browser(page, direct_result.exact_url)
                 html_text = await self._wait_for_browser_exact_html(page)
                 final_url = page.url
-            except Exception:
+            except LensExactMatchesError:
                 await self._save_playwright_debug(page)
                 raise
+            except Exception:
+                await self._save_playwright_debug(page)
+                raise LensExactMatchesError("browser_navigation_failed") from None
             finally:
                 await context.close()
                 if browser:
@@ -402,11 +432,25 @@ class GoogleLensExactMatchesClient:
             await page.wait_for_timeout(1000)
 
         validation = validate_exact_html(last_html)
-        raise RuntimeError(f"Timed out waiting for Exact Matches HTML: {validation}")
+        if validation["contains_google_block"]:
+            reason = "captcha"
+        elif validation["contains_no_matches"]:
+            reason = "no_matches_page"
+        elif not validation["contains_exact_matches"]:
+            reason = "no_exact_match_tab"
+        else:
+            reason = "validation_failed"
+        raise LensExactMatchesError(
+            reason,
+            f"Timed out waiting for Exact Matches HTML: {validation}",
+        )
 
     async def _save_playwright_debug(self, page):
         try:
-            DEBUG_PLAYWRIGHT_HTML.write_text(await page.content(), encoding="utf-8")
+            content = await page.content()
+            DEBUG_PLAYWRIGHT_HTML.write_text(content, encoding="utf-8")
+            fail_path = Path(f"debug_fail_{next(DEBUG_FAIL_COUNTER):03d}.html")
+            fail_path.write_text(content, encoding="utf-8")
         except Exception:
             pass
         try:
@@ -461,7 +505,16 @@ class GoogleLensExactMatchesClient:
                 continue
 
     async def _fetch_image(self, client, image_url: str):
-        response = await client.get(image_url, follow_redirects=True)
+        headers = {
+            "User-Agent": self.headers.get(
+                "User-Agent",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:151.0) Gecko/20100101 Firefox/151.0",
+            ),
+            "Accept": "image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": self.headers.get("Accept-Language", "en-US,en;q=0.9"),
+            "Referer": "https://www.google.com/",
+        }
+        response = await client.get(image_url, headers=headers, follow_redirects=True)
         response.raise_for_status()
         content_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
         filename = Path(urlparse(image_url).path).name or "image.jpg"
