@@ -130,6 +130,10 @@ firefox_replay_exact_match.html
 browser_profile/
 debug_playwright_final.html
 debug_playwright_final.png
+debug_fail_*.html
 api_test.html
 cookies_lens_test.json
 exact_match_test.html
+batch_fail_*.html
+batch_test_results*.json
+batch_test_results*.csv

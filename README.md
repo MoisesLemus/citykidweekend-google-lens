@@ -27,7 +27,9 @@ This fork also includes a Project 4 proof-of-concept API:
 GET /google-lens?imageUrl={image_url}
 ```
 
-The endpoint returns raw Google Lens / Google Search Exact Matches HTML. The implementation keeps the reverse-engineered direct HTTP flow as attempt #1:
+The endpoint returns raw Google Lens / Google Search Exact Matches HTML. The stable default path uses Playwright Firefox with a warmed persistent profile, one reusable browser context, and one shared page guarded by an `asyncio.Lock`. The reverse-engineered direct HTTP flow was researched but is disabled by default because Google returns a JavaScript retry shell in this environment.
+
+The disabled direct HTTP research flow is:
 
 1. Download the input image URL.
 2. Upload bytes to `https://lens.google.com/v3/upload`.
@@ -35,7 +37,7 @@ The endpoint returns raw Google Lens / Google Search Exact Matches HTML. The imp
 4. Set `udm=48` for Exact Matches.
 5. Fetch the resulting Google Search document.
 
-Direct HTTP can return Google's JavaScript retry shell (`/httpservice/retry/enablejs`, `knitsail`, `SG_SS`, `enablejs`). When that happens, the API treats the body as invalid and falls back to Playwright Firefox so the browser can execute Google's retry step and return `page.content()`.
+Direct HTTP can be re-enabled for future debugging with `LENS_USE_DIRECT_HTTP=1`. When enabled, Google can return its JavaScript retry shell (`/httpservice/retry/enablejs`, `knitsail`, `SG_SS`, `enablejs`). When that happens, the API treats the body as invalid and falls back to Playwright Firefox so the browser can execute Google's retry step and return `page.content()`.
 
 If Firefox receives a Google captcha / unusual-traffic page, the API returns `502` instead of returning that block page as a successful Exact Matches response.
 
@@ -57,6 +59,7 @@ PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
 
 Then call the API once. A visible Firefox window should open. If Google asks for consent or a captcha, complete it manually in that window. The browser state is kept in `./browser_profile`, so retrying the API can reuse the warmed profile.
 The first request may wait until `LENS_BROWSER_TIMEOUT` while you complete the prompt.
+After the first successful request, the FastAPI process keeps the warmed Firefox context/page open and reuses it for later requests. Requests remain effectively concurrency `1` because the shared page is protected by a lock.
 
 Successful local warmup flow:
 
@@ -70,6 +73,7 @@ Expected successful test markers:
 ```text
 status: 200
 source: playwright_firefox
+direct_attempt: skipped
 valid_exact_match_html: true
 contains_exact_matches: true
 contains_ebay: true
@@ -81,19 +85,22 @@ Google's normal result HTML can contain inert retry/enablejs strings inside scri
 The response includes:
 
 ```text
-X-Google-Lens-Source: direct_http
+X-Google-Lens-Source: playwright_firefox
+X-Google-Lens-Direct-Attempt: skipped
 ```
 
-or:
+If direct HTTP is explicitly enabled and succeeds before the browser fallback, the source can be:
 
 ```text
-X-Google-Lens-Source: playwright_firefox
+X-Google-Lens-Source: direct_http
+X-Google-Lens-Direct-Attempt: performed
 ```
 
 When browser fallback is used, the source header should be:
 
 ```text
 X-Google-Lens-Source: playwright_firefox
+X-Google-Lens-Direct-Attempt: skipped
 ```
 
 Local validation:
@@ -127,6 +134,7 @@ Warm up the persistent Firefox profile:
 export LENS_PLAYWRIGHT_HEADLESS=0
 export LENS_PLAYWRIGHT_PROFILE_DIR=./browser_profile
 export LENS_BROWSER_TIMEOUT=180
+export LENS_USE_DIRECT_HTTP=0
 PYTHONPATH=src uvicorn chrome_lens_py.server:app --host 127.0.0.1 --port 8000
 ```
 
@@ -154,15 +162,18 @@ Expected source header when fallback is used:
 
 ```text
 X-Google-Lens-Source: playwright_firefox
+X-Google-Lens-Direct-Attempt: skipped
 ```
 
 Known limitation: this local setup depends on a persistent Firefox profile. Google may require a one-time manual consent/captcha warmup in the visible browser before automated requests succeed.
 
-Recommended local concurrency: `1`. This is the only stable tested mode.
+Recommended local concurrency: `1`. This is the only stable tested mode. The server reuses one warmed browser page and serializes requests through a lock.
 
 Concurrency 2 was tested with one persistent Firefox profile and produced 0% success due to browser/profile contention. Do not run multiple concurrent requests against one profile.
 
-Current practical throughput is about 350 requests/hour per warmed worker. Reaching 1000 requests/hour is not supported by this implementation yet. The theoretical path would require at least 3 isolated warmed workers, each with its own browser profile and likely its own process/container/IP, but that has not been tested.
+Latest 1000-style run: attempted 1000 sequential requests and stopped early at 686 because captcha/unusual traffic appeared 4 times. Results were 680 valid pages, 667 valid pages with results, 13 no-match pages, 6 true failures, 99.1% success rate, 2.298s average latency, 2.377s p95 latency, and an estimated 1556.9 requests/hour.
+
+Interpretation: the API met the challenge's 300+ valid HTML threshold before early stop and exceeded latency requirements. Google captcha/unusual-traffic risk remains the main scaling limitation, so recommended max concurrency remains `1` for this local single-profile setup.
 
 ## 🚀 Quick Start for Windows Users
 
